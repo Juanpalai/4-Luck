@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Data / models / experiments (large generated artifacts)
+*.pt
+*.onnx
+checkpoints/
+experiments/
+training/
+data/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Secrets / env
+.env
+*.key
+*.pem
+
+# Skills tooling
+.agents/
+skills-lock.json
+
+# Docs
+models.md

@@ -1,0 +1,62 @@
+# Default configuration for four-leaf clover segmentation training.
+# Override any field via CLI flags (see scripts/train.py) or by editing this file.
+
+# --- data ---
+data_root: "training"
+train_images: "TrainImages"
+train_masks: "TrainLabel"
+test_images: "TestImages"
+test_masks: "TestLabels"
+mask_binarize_threshold: 127
+
+# --- input ---
+# Native images are 800x600 (4:3). 640x480 preserves aspect ratio with no
+# distortion; a typical clover (median 43px max-dim) becomes ~34px, the 5th
+# percentile (15px) becomes ~12px. See experiments/dataset_analysis/.
+image_size: [640, 480]
+
+# --- data split ---
+val_fraction: 0.10
+seed: 42
+
+# --- training ---
+epochs: 60
+batch_size: 8
+lr: 1.0e-3
+weight_decay: 1.0e-4
+lr_scheduler: "cosine"
+num_workers: 4
+amp: true
+grad_clip: 0.0
+save_every: 10
+
+# --- model ---
+encoder: "mobilenet_v3_small"
+encoder_pretrained: true
+decoder_channels: 96
+output_stride: 32
+
+# --- loss ---
+loss: "bce_dice"
+dice_weight: 1.0
+bce_weight: 1.0
+
+# --- post-processing ---
+threshold: 0.5
+
+# --- augmentation ---
+augment: true
+hflip_p: 0.5
+vflip_p: 0.0
+rotate_limit: 15
+scale_limit: 0.1
+brightness_limit: 0.2
+contrast_limit: 0.2
+blur_p: 0.1
+
+# --- paths / runtime ---
+checkpoint_dir: "checkpoints"
+experiment_dir: "experiments"
+experiment_name: "clover_unet"
+device: "auto"
+deterministic: true
