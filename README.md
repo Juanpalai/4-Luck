@@ -115,6 +115,37 @@ python scripts/calibrate_threshold.py --checkpoint checkpoints/clover_res768/bes
     --config configs/exp_res768.yaml
 ```
 
+### 5. Export to ONNX (mobile-ready)
+
+```bash
+# fp32 at both resolutions:
+python scripts/export_model.py --checkpoint checkpoints/clover_res768/best.pt \
+    --config configs/exp_res768.yaml
+python scripts/export_model.py --checkpoint checkpoints/clover_res768/best.pt \
+    --config configs/exp_res768.yaml --input-size 640,480 --fp16
+```
+
+Produces `best_onWxH[_fp16].onnx` in the checkpoint dir. Parity vs PyTorch is
+checked automatically (max prob diff < 1e-4). Single-image ONNX inference:
+
+```bash
+python scripts/onnx_predict.py --onnx checkpoints/clover_res768/best_on640x480_fp16.onnx \
+    --image training/TrainImages/1_000001.jpg
+```
+
+Evaluate an exported model on the test set:
+
+```bash
+python scripts/evaluate.py --backend onnx \
+    --onnx checkpoints/clover_res768/best_on768x576_fp16.onnx
+```
+
+Benchmark latency/FPS across backends and resolutions:
+
+```bash
+python scripts/benchmark_onnx.py --all
+```
+
 ## Architecture
 
 Lightweight **U-Net** with a pretrained **MobileNetV3-Small** encoder
@@ -195,23 +226,68 @@ matching at IoU ≥ 0.1). Findings:
 - The dataset has almost no negative examples (0.1–0.4% empty masks), so
   false-positive control remains a deployment concern.
 
+## ONNX export & optimization (Phase 5)
+
+Model: MobileNetV3-Small U-Net, 2.19M params. Exported with torch.onnx
+(opset 17, fixed batch 1, `dynamo=False` legacy exporter → self-contained file),
+verified parity vs PyTorch (max prob diff 0.0).
+
+**Test-set accuracy after export** (threshold 0.5):
+
+| model | IoU | Dice | Precision | Recall |
+|---|---|---|---|---|
+| torch 768×576 (reference) | 0.175 | 0.298 | 0.446 | 0.223 |
+| onnx fp32 768×576 | 0.177 | 0.300 | 0.446 | 0.227 |
+| **onnx fp16 768×576** | **0.177** | **0.301** | **0.445** | **0.227** |
+| onnx int8 768×576 | 0.006 | 0.012 | 0.091 | 0.007 |
+| onnx fp32 640×480 | 0.173 | 0.295 | 0.470 | 0.215 |
+| onnx fp16 640×480 | 0.173 | 0.295 | 0.469 | 0.216 |
+| onnx int8 640×480 | 0.007 | 0.015 | 0.113 | 0.008 |
+
+**Inference latency** (30 reps after 5 warmup):
+
+| backend | input | ms/frame | fps | size |
+|---|---|---|---|---|
+| torch CUDA | 768×576 | 16.8 | ~60 | — |
+| torch CPU | 768×576 | 976 | 1.0 | — |
+| onnxruntime CPU fp32 | 640×480 | 324 | 3.1 | 8.73 MB |
+| onnxruntime CPU fp32 | 768×576 | 462 | 2.2 | 8.73 MB |
+| onnxruntime CPU fp16 | 640×480 | 338 | 3.0 | 4.40 MB |
+| onnxruntime CPU fp16 | 768×576 | 495 | 2.0 | 4.40 MB |
+| onnxruntime CPU int8 | 640×480 | 924 | 1.1 | 2.35 MB |
+
+**Conclusions:**
+- **fp16 is the mobile choice**: accuracy is effectively lossless (IoU 0.177) at
+  half the size (4.40 MB) and it can use FP16/GPU acceleration on Android.
+  CPU numbers above are a desktop x86 proxy, not representative of mobile.
+- **int8 dynamic quantization is unusable** (IoU 0.006): would require
+  quantization-aware training; rejected for now.
+- **640×480 keeps ~all accuracy** (IoU 0.173 vs 0.177) with less compute — the
+  recommended input for the mobile app.
+- **PC real-time is fine via CUDA** (~60 fps at 768×576).
+
 ## Known limitations
 
 1. **No negative images** — only 0.1–0.4% of masks are empty. False-positive
    control must be handled via threshold/post-processing; ideally collect
    clover-field photos without any four-leaf clovers.
-2. Mobile/ONNX deployment is a later phase and not implemented yet.
+2. **Small clovers (≤32px) are rarely detected** — the model's main weakness;
+   int8 quantization made this much worse, so fp16 is the deployment choice.
+3. Mobile app (Android/Kotlin with ONNX Runtime) is the remaining phase, not
+   implemented yet.
 
 ## Project layout
 
 ```
-scripts/          analyze_dataset.py, train.py, evaluate.py
+scripts/          analyze_dataset.py, train.py, evaluate.py, predict.py,
+                  analyze_errors.py, calibrate_threshold.py, export_model.py,
+                  onnx_predict.py, benchmark_onnx.py
 src/config.py     centralized config (dataclass + YAML)
 src/dataset/      CloverDataset, mask binarization, loader builders
 src/models/       LightweightUNet (MobileNetV3-Small encoder)
 src/training/     losses, trainer (AMP, checkpointing)
 src/evaluation/   metrics (IoU/Dice/P/R/F1)
 src/augmentations.py
-experiments/      dataset analysis artifacts
-checkpoints/      saved models
+experiments/      dataset analysis, eval and ONNX artifacts
+checkpoints/      saved models + exported .onnx files
 ```

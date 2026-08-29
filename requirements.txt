@@ -7,3 +7,7 @@ Pillow>=10.0
 matplotlib>=3.7
 tqdm>=4.65
 PyYAML>=6.0
+onnx>=1.15
+onnxruntime>=1.17
+onnxconverter-common>=1.14
+onnxscript>=0.1

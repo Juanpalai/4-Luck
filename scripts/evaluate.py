@@ -1,8 +1,11 @@
 #!/usr/bin/env python
-"""Evaluate a trained checkpoint on the held-out test set.
+"""Evaluate a trained model on the held-out test set.
+
+Supports PyTorch checkpoints and exported ONNX models (fp32/fp16/int8).
 
 Usage:
     python scripts/evaluate.py --checkpoint checkpoints/clover_unet/best.pt
+    python scripts/evaluate.py --backend onnx --onnx checkpoints/clover_res768/best_on640x480.onnx
     python scripts/evaluate.py --checkpoint <path> --threshold 0.5 --save-vis 12
 """
 
@@ -10,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -31,7 +35,9 @@ from src.utils.seed import get_device, set_seed
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Evaluate a checkpoint on the test set")
-    ap.add_argument("--checkpoint", required=True)
+    ap.add_argument("--checkpoint", help="torch checkpoint (backend=torch)")
+    ap.add_argument("--backend", choices=["torch", "onnx"], default="torch")
+    ap.add_argument("--onnx", help="path to .onnx model (backend=onnx)")
     ap.add_argument("--config", default="configs/default.yaml")
     ap.add_argument("--image-size", help="W,H override e.g. 640,480")
     ap.add_argument("--batch-size", type=int)
@@ -42,7 +48,8 @@ def main() -> None:
 
     cfg = Config.from_yaml(args.config)
     overrides = {k: v for k, v in vars(args).items()
-                 if v is not None and k not in {"config", "checkpoint", "save_vis", "out_dir"}}
+                 if v is not None and k not in {"config", "checkpoint", "save_vis", "out_dir",
+                                                "backend", "onnx"}}
     cfg.update_from_dict(overrides)
     if args.image_size:
         w, h = args.image_size.split(",")
@@ -51,40 +58,67 @@ def main() -> None:
     device = get_device(cfg.device)
     set_seed(cfg.seed, cfg.deterministic)
 
-    model = build_model(cfg).to(device)
-    state = load_checkpoint(Path(args.checkpoint), model, device=device)
-    print(f"loaded {args.checkpoint} (epoch {state.get('epoch')}, "
-          f"val IoU {state.get('val_metrics', {}).get('iou', 'n/a')})")
+    session = None
+    if args.backend == "onnx":
+        if not args.onnx:
+            raise SystemExit("--onnx is required with --backend onnx")
+        import onnxruntime as ort
+        session = ort.InferenceSession(args.onnx, providers=["CPUExecutionProvider"])
+        # the ONNX model's input size is fixed; recover it from "name_onWxH[_quant].onnx"
+        m = re.search(r"_on(\d+)x(\d+)", args.onnx)
+        if not m:
+            raise SystemExit(f"cannot infer input size from ONNX filename: {args.onnx}")
+        w, h = int(m.group(1)), int(m.group(2))
+        cfg.image_size = (w, h)
+        cfg.batch_size = 1  # ONNX models are exported with a fixed batch of 1
+        print(f"onnx session loaded: {args.onnx}")
+    else:
+        if not args.checkpoint:
+            raise SystemExit("--checkpoint is required with --backend torch")
+        model = build_model(cfg).to(device)
+        state = load_checkpoint(Path(args.checkpoint), model, device=device)
+        print(f"loaded {args.checkpoint} (epoch {state.get('epoch')}, "
+              f"val IoU {state.get('val_metrics', {}).get('iou', 'n/a')})")
 
     loader = build_test_loader(cfg)
     metrics = SegmentationMetrics(threshold=cfg.threshold)
-    criterion = build_loss(cfg)
+    criterion = build_loss(cfg) if args.backend == "torch" else None
     total_loss, n = 0.0, 0
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     saved = 0
     with torch.no_grad():
-        for images, masks in tqdm(loader, desc="test"):
-            images, masks = images.to(device), masks.to(device)
-            logits = model(images)
-            loss = criterion(logits, masks)
-            total_loss += loss.item() * images.size(0)
-            n += images.size(0)
+        for images, masks in tqdm(loader, desc="test", mininterval=5.0):
+            if args.backend == "torch":
+                images, masks = images.to(device), masks.to(device)
+                logits = model(images)
+                loss = criterion(logits, masks)
+                total_loss += loss.item() * images.size(0)
+                n += images.size(0)
+            else:
+                input_name = session.get_inputs()[0].name
+                if session.get_inputs()[0].type == "tensor(float16)":
+                    feed = images.half().numpy()
+                else:
+                    feed = images.numpy()
+                out = session.run(None, {input_name: feed})[0]
+                logits = torch.from_numpy(np.asarray(out)).float()
             metrics.update(logits.float(), masks.float())
 
             if saved < args.save_vis:
                 for i in range(images.size(0)):
                     if saved >= args.save_vis:
                         break
-                    save_overlay(images[i], masks[i], logits[i], cfg, out_dir, saved, state.get("epoch", 0))
+                    save_overlay(images[i], masks[i], logits[i], cfg, out_dir, saved, 0)
                     saved += 1
 
     summary = metrics.summary()
-    summary["loss"] = round(total_loss / n, 4)
+    if args.backend == "torch":
+        summary["loss"] = round(total_loss / n, 4)
     summary["threshold"] = cfg.threshold
     summary["image_size"] = cfg.image_size
-    summary["checkpoint"] = str(args.checkpoint)
+    summary["model"] = str(args.checkpoint or args.onnx)
     with open(out_dir / "test_metrics.json", "w") as f:
         json.dump(summary, f, indent=2)
     print(json.dumps(summary, indent=2))
