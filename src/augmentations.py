@@ -19,7 +19,18 @@ STD = (0.229, 0.224, 0.225)
 
 
 def get_train_transform(cfg) -> A.Compose:
-    transforms = [A.Resize(height=cfg.image_size[1], width=cfg.image_size[0], interpolation=1)]
+    transforms = []
+    if cfg.random_scale_limit > 0:
+        # simulate camera distance: resize image+mask by a random factor, then
+        # Resize brings it back to the fixed training size
+        transforms.append(
+            A.RandomScale(
+                scale_limit=(-cfg.random_scale_limit, cfg.random_scale_limit),
+                interpolation=1,
+                p=0.7,
+            )
+        )
+    transforms.append(A.Resize(height=cfg.image_size[1], width=cfg.image_size[0], interpolation=1))
     if cfg.augment:
         transforms += [
             A.HorizontalFlip(p=cfg.hflip_p),

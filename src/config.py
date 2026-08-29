@@ -27,7 +27,7 @@ class Config:
     mask_binarize_threshold: int = 127
 
     # --- input ---
-    image_size: tuple[int, int] = (640, 480)  # (W, H), preserves 800x600 aspect ratio
+    image_size: tuple[int, int] = (768, 576)  # (W, H), preserves 800x600 aspect ratio
 
     # --- data split ---
     val_fraction: float = 0.10
@@ -35,7 +35,7 @@ class Config:
 
     # --- training ---
     epochs: int = 60
-    batch_size: int = 8
+    batch_size: int = 6
     lr: float = 1e-3
     weight_decay: float = 1e-4
     lr_scheduler: str = "cosine"  # cosine | step | none
@@ -69,6 +69,7 @@ class Config:
     vflip_p: float = 0.0
     rotate_limit: int = 15
     scale_limit: float = 0.1
+    random_scale_limit: float = 0.0  # distance simulation; >0 resizes before crop to fixed size
     brightness_limit: float = 0.2
     contrast_limit: float = 0.2
     gamma_limit: tuple[float, float] = (80.0, 120.0)

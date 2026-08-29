@@ -1,0 +1,6 @@
+# Experiment A: higher input resolution to help small-object detection.
+# 768x576 keeps the 4:3 aspect; q05 clovers grow 12px -> 14.4px at input.
+image_size: [768, 576]
+batch_size: 6
+decoder_channels: 96
+output_stride: 32

@@ -27,6 +27,7 @@ data/
 # Skills tooling
 .agents/
 skills-lock.json
+opencode.txt
 
 # Docs
 models.md

@@ -49,13 +49,15 @@ Clover size at each candidate input resolution (longest side resized to R):
 | 256 | 0.32 | 13.8 px | 4.8 px | 104 px² |
 | 384 | 0.48 | 20.6 px | 7.2 px | 234 px² |
 | 512 | 0.64 | 27.5 px | 9.6 px | 417 px² |
-| **640x480** | **0.80** | **34.4 px** | **12.0 px** | **651 px²** |
-| 768 | 0.96 | 41.3 px | 14.4 px | 937 px² |
+| 640x480 | 0.80 | 34.4 px | 12.0 px | 651 px² |
+| **768x576** | **0.96** | **41.3 px** | **14.4 px** | **937 px²** |
 
-**Recommended: 640x480** — preserves the 4:3 aspect ratio (no distortion or
-padding), keeps the smallest clovers ≥12 px in feature-relevant size, and is a
-realistic target for future mobile inference. 256/384 make small clovers
-<10 px, which a lightweight segmentation network cannot resolve reliably.
+**Recommended: 768x576 (default)** — preserves the 4:3 aspect ratio (no
+distortion or padding). It was the empirically best input in the experiments
+(val IoU 0.289 vs 0.250 at 640×480): the smallest clovers (q05) stay ~14 px at
+input instead of 12 px, which matters because small-object detection is the
+model's main weakness. 256/384 make small clovers <10 px, which a lightweight
+segmentation network cannot resolve reliably.
 
 **Crops/tiling are NOT necessary**: clovers are a small fraction of the image
 but median ~43 px at native is comfortably larger than the ~12 px threshold
@@ -94,11 +96,24 @@ selected by validation IoU. History/logs go to `experiments/clover_unet/`.
 ### 3. Evaluate on the held-out test set
 
 ```bash
+# winning model (768x576): uses its own experiment config
+python scripts/evaluate.py --checkpoint checkpoints/clover_res768/best.pt \
+    --config configs/exp_res768.yaml --save-vis 12
+# default experiment checkpoint:
 python scripts/evaluate.py --checkpoint checkpoints/clover_unet/best.pt --save-vis 12
 ```
 
 Reports IoU / Dice / Precision / Recall / F1 and writes prediction overlays to
 `experiments/evaluation/`.
+
+### 4. Error analysis & threshold calibration
+
+```bash
+python scripts/analyze_errors.py --checkpoint checkpoints/clover_res768/best.pt \
+    --config configs/exp_res768.yaml
+python scripts/calibrate_threshold.py --checkpoint checkpoints/clover_res768/best.pt \
+    --config configs/exp_res768.yaml
+```
 
 ## Architecture
 
@@ -137,29 +152,48 @@ Fixed seed (42) for both numpy/torch and the DataLoader workers; deterministic
 cuDNN; the train/val split is derived from the same seed. Every run records its
 full config to `experiments/<name>/config.json` / `config.yaml`.
 
-## Performance results (baseline)
+## Performance results (baseline → improved)
 
-Trained on the full train split (900/100 val, seed 42), 60 epochs, 640×480,
-batch 8, AMP, BCE+Dice, cosine LR 1e-3, MobileNetV3-Small U-Net (2.2M params),
-~32 s/epoch on an RTX 2070 SUPER.
+All runs: 60 epochs, AMP, BCE+Dice, cosine LR 1e-3, MobileNetV3-Small U-Net,
+seed 42, on an RTX 2070 SUPER.
 
-**Validation** (best epoch 52, `checkpoints/clover_unet/best.pt`):
+**Experiment summary (validation IoU):**
 
-| IoU | Dice | Precision | Recall | F1 |
-|---|---|---|---|---|
-| 0.250 | 0.399 | 0.414 | 0.384 | 0.398 |
+| run | input | changes | val IoU |
+|---|---|---|---|
+| baseline | 640×480 | — | 0.250 |
+| **res768 (winner)** | **768×576** | higher resolution | **0.289** |
+| stride16 | 640×480 | output_stride=16 | 0.270 |
+| res768 + stride16 | 768×576 | combined | 0.265 |
+| scale-aug | 640×480 | random-scale 0.65–1.35× | 0.238 |
 
-**Test set** (held-out, 500 images, threshold 0.5):
+**Winner: `configs/exp_res768.yaml` (768×576, batch 6, stride 32)** — the
+default `configs/default.yaml` is updated to this setup. Checkpoint:
+`checkpoints/clover_res768/best.pt` (val IoU 0.289 at epoch 49).
 
-| IoU | Dice | Precision | Recall | F1 |
-|---|---|---|---|---|
-| 0.169 | 0.289 | 0.418 | 0.221 | 0.289 |
+**Test set (best.pt, threshold 0.5):**
 
-Test performance is lower than validation — the test set has larger/more
-clovers (median foreground 0.71% vs 0.33%) plus JPEG mask noise. Recall is the
-main weakness (0.22), suggesting small/hard clovers are missed. Obvious next
-steps: train at 768×576, add random-scale augmentation, increase epochs, or
-tune the post-processing threshold.
+| model | IoU | Dice | Precision | Recall | F1 |
+|---|---|---|---|---|---|
+| baseline 640×480 | 0.169 | 0.289 | 0.418 | 0.221 | 0.289 |
+| res768 768×576 | 0.175 | 0.298 | 0.446 | 0.223 | 0.298 |
+
+### Error analysis
+
+`scripts/analyze_errors.py` classifies failures on the test set (component
+matching at IoU ≥ 0.1). Findings:
+
+- **Small clovers are essentially never detected**: 0% of ≤16px and ~4–12% of
+  16–32px GT components are found; detection rises to ~30% (32–64px) and ~40%
+  (64–128px). Small-object detection is the model's main weakness.
+- **Per-image IoU is bimodal**: median 0.01, q25 0.0 — more than half the test
+  images get ~0 IoU while some score >0.5. The model is fragile across the
+  train/test distribution shift (test clovers are larger/denser).
+- **Threshold calibration** shows the model is already well-calibrated (IoU is
+  flat across 0.3–0.8), so 0.5 needs no tuning; the recall ceiling (~0.4 val)
+  is a detection problem, not a threshold problem.
+- The dataset has almost no negative examples (0.1–0.4% empty masks), so
+  false-positive control remains a deployment concern.
 
 ## Known limitations
 
